@@ -18,6 +18,7 @@ INSTALL_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 INSTALL_SKILLS_DIR="$(dirname "$INSTALL_GSTACK_DIR")"
 BROWSE_BIN="$SOURCE_GSTACK_DIR/browse/dist/browse"
+HOST_EXPORT_SCRIPT="$SOURCE_GSTACK_DIR/scripts/host-config-export.ts"
 CODEX_SKILLS="$HOME/.codex/skills"
 CODEX_GSTACK="$CODEX_SKILLS/gstack"
 FACTORY_SKILLS="$HOME/.factory/skills"
@@ -32,6 +33,27 @@ esac
 QUIET=0
 log() { [ "$QUIET" -eq 0 ] && echo "$@" || true; }
 
+GENERATED_HOSTS="opencode cursor slate"
+
+host_config_get() {
+  bun "$HOST_EXPORT_SCRIPT" get "$1" "$2"
+}
+
+generated_host_skill_dir() {
+  local host="$1"
+  local host_subdir
+  host_subdir="$(host_config_get "$host" hostSubdir)"
+  echo "$SOURCE_GSTACK_DIR/$host_subdir/skills"
+}
+
+add_generated_host_install() {
+  local host="$1"
+  case " $INSTALL_GENERATED_HOSTS " in
+    *" $host "*) ;;
+    *) INSTALL_GENERATED_HOSTS="${INSTALL_GENERATED_HOSTS:+$INSTALL_GENERATED_HOSTS }$host" ;;
+  esac
+}
+
 # ─── Parse flags ──────────────────────────────────────────────
 HOST="claude"
 LOCAL_INSTALL=0
@@ -39,9 +61,10 @@ SKILL_PREFIX=1
 SKILL_PREFIX_FLAG=0
 TEAM_MODE=0
 NO_TEAM_MODE=0
+INSTALL_GENERATED_HOSTS=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --host) [ -z "$2" ] && echo "Missing value for --host (expected claude, codex, kiro, or auto)" >&2 && exit 1; HOST="$2"; shift 2 ;;
+    --host) [ -z "$2" ] && echo "Missing value for --host (expected claude, codex, kiro, factory, opencode, cursor, slate, openclaw, or auto)" >&2 && exit 1; HOST="$2"; shift 2 ;;
     --host=*) HOST="${1#--host=}"; shift ;;
     --local) LOCAL_INSTALL=1; shift ;;
     --prefix)    SKILL_PREFIX=1; SKILL_PREFIX_FLAG=1; shift ;;
@@ -55,6 +78,7 @@ done
 
 case "$HOST" in
   claude|codex|kiro|factory|auto) ;;
+  opencode|cursor|slate) ;;
   openclaw)
     echo ""
     echo "OpenClaw integration uses a different model — OpenClaw spawns Claude Code"
@@ -67,7 +91,7 @@ case "$HOST" in
     echo "  3. See docs/OPENCLAW.md for the full architecture"
     echo ""
     exit 0 ;;
-  *) echo "Unknown --host value: $HOST (expected claude, codex, kiro, factory, openclaw, or auto)" >&2; exit 1 ;;
+  *) echo "Unknown --host value: $HOST (expected claude, codex, kiro, factory, opencode, cursor, slate, openclaw, or auto)" >&2; exit 1 ;;
 esac
 
 # ─── Resolve skill prefix preference ─────────────────────────
@@ -75,7 +99,7 @@ esac
 GSTACK_CONFIG="$SOURCE_GSTACK_DIR/bin/gstack-config"
 export GSTACK_SETUP_RUNNING=1  # Prevent gstack-config post-set hook from triggering relink mid-setup
 if [ "$SKILL_PREFIX_FLAG" -eq 0 ]; then
-  _saved_prefix="$("$GSTACK_CONFIG" get skill_prefix 2>/dev/null || true)"
+  _saved_prefix="$($GSTACK_CONFIG get skill_prefix 2>/dev/null || true)"
   if [ "$_saved_prefix" = "true" ]; then
     SKILL_PREFIX=1
   elif [ "$_saved_prefix" = "false" ]; then
@@ -135,8 +159,11 @@ if [ "$HOST" = "auto" ]; then
   command -v codex >/dev/null 2>&1 && INSTALL_CODEX=1
   command -v kiro-cli >/dev/null 2>&1 && INSTALL_KIRO=1
   command -v droid >/dev/null 2>&1 && INSTALL_FACTORY=1
+  command -v opencode >/dev/null 2>&1 && add_generated_host_install opencode
+  command -v cursor >/dev/null 2>&1 && add_generated_host_install cursor
+  command -v slate >/dev/null 2>&1 && add_generated_host_install slate
   # If none found, default to claude
-  if [ "$INSTALL_CLAUDE" -eq 0 ] && [ "$INSTALL_CODEX" -eq 0 ] && [ "$INSTALL_KIRO" -eq 0 ] && [ "$INSTALL_FACTORY" -eq 0 ]; then
+  if [ "$INSTALL_CLAUDE" -eq 0 ] && [ "$INSTALL_CODEX" -eq 0 ] && [ "$INSTALL_KIRO" -eq 0 ] && [ "$INSTALL_FACTORY" -eq 0 ] && [ -z "$INSTALL_GENERATED_HOSTS" ]; then
     INSTALL_CLAUDE=1
   fi
 elif [ "$HOST" = "claude" ]; then
@@ -147,6 +174,8 @@ elif [ "$HOST" = "kiro" ]; then
   INSTALL_KIRO=1
 elif [ "$HOST" = "factory" ]; then
   INSTALL_FACTORY=1
+elif [ "$HOST" = "opencode" ] || [ "$HOST" = "cursor" ] || [ "$HOST" = "slate" ]; then
+  add_generated_host_install "$HOST"
 fi
 
 migrate_direct_codex_install() {
@@ -247,6 +276,17 @@ if [ "$INSTALL_FACTORY" -eq 1 ] && [ "$NEEDS_BUILD" -eq 0 ]; then
     bun install --frozen-lockfile 2>/dev/null || bun install
     bun run gen:skill-docs --host factory
   )
+fi
+
+if [ -n "$INSTALL_GENERATED_HOSTS" ] && [ "$NEEDS_BUILD" -eq 0 ]; then
+  for host in $INSTALL_GENERATED_HOSTS; do
+    log "Generating $(host_config_get "$host" displayName) skill docs..."
+    (
+      cd "$SOURCE_GSTACK_DIR"
+      bun install --frozen-lockfile 2>/dev/null || bun install
+      bun run gen:skill-docs --host "$host"
+    )
+  done
 fi
 
 # 2. Ensure Playwright's Chromium is available
@@ -602,6 +642,72 @@ link_factory_skill_dirs() {
   fi
 }
 
+create_generated_runtime_root() {
+  local host="$1"
+  local gstack_dir="$2"
+  local host_gstack="$3"
+  local generated_dir
+  generated_dir="$(generated_host_skill_dir "$host")"
+
+  if [ -L "$host_gstack" ]; then
+    rm -f "$host_gstack"
+  elif [ -d "$host_gstack" ] && [ "$host_gstack" != "$gstack_dir" ]; then
+    rm -rf "$host_gstack"
+  fi
+
+  mkdir -p "$host_gstack"
+
+  if [ -f "$generated_dir/gstack/SKILL.md" ]; then
+    ln -snf "$generated_dir/gstack/SKILL.md" "$host_gstack/SKILL.md"
+  fi
+
+  while IFS= read -r relpath; do
+    [ -z "$relpath" ] && continue
+    src="$gstack_dir/$relpath"
+    dst="$host_gstack/$relpath"
+    if [ -d "$src" ] || [ -f "$src" ]; then
+      mkdir -p "$(dirname "$dst")"
+      ln -snf "$src" "$dst"
+    fi
+  done <<EOF
+$(bun "$HOST_EXPORT_SCRIPT" symlinks "$host" 2>/dev/null || true)
+EOF
+}
+
+link_generated_skill_dirs() {
+  local host="$1"
+  local gstack_dir="$2"
+  local skills_dir="$3"
+  local generated_dir
+  local linked=()
+  generated_dir="$(generated_host_skill_dir "$host")"
+
+  if [ ! -d "$generated_dir" ]; then
+    echo "  Generating $(host_config_get "$host" displayName) skill docs..."
+    ( cd "$gstack_dir" && bun run gen:skill-docs --host "$host" )
+  fi
+
+  if [ ! -d "$generated_dir" ]; then
+    echo "  warning: $generated_dir generation failed — run 'bun run gen:skill-docs --host $host' manually" >&2
+    return 1
+  fi
+
+  for skill_dir in "$generated_dir"/gstack*/; do
+    if [ -f "$skill_dir/SKILL.md" ]; then
+      skill_name="$(basename "$skill_dir")"
+      [ "$skill_name" = "gstack" ] && continue
+      target="$skills_dir/$skill_name"
+      if [ -L "$target" ] || [ ! -e "$target" ]; then
+        ln -snf "$skill_dir" "$target"
+        linked+=("$skill_name")
+      fi
+    fi
+  done
+  if [ ${#linked[@]} -gt 0 ]; then
+    echo "  linked skills: ${linked[*]}"
+  fi
+}
+
 # 4. Install for Claude (default)
 SKILLS_BASENAME="$(basename "$INSTALL_SKILLS_DIR")"
 SKILLS_PARENT_BASENAME="$(basename "$(dirname "$INSTALL_SKILLS_DIR")")"
@@ -762,6 +868,21 @@ if [ "$INSTALL_FACTORY" -eq 1 ]; then
   echo "gstack ready (factory)."
   echo "  browse: $BROWSE_BIN"
   echo "  factory skills: $FACTORY_SKILLS"
+fi
+
+# 6c. Install for generated external hosts
+if [ -n "$INSTALL_GENERATED_HOSTS" ]; then
+  for host in $INSTALL_GENERATED_HOSTS; do
+    HOST_ROOT_REL="$(host_config_get "$host" globalRoot)"
+    HOST_SKILLS="$HOME/$(dirname "$HOST_ROOT_REL")"
+    HOST_GSTACK="$HOME/$HOST_ROOT_REL"
+    mkdir -p "$HOST_SKILLS"
+    create_generated_runtime_root "$host" "$SOURCE_GSTACK_DIR" "$HOST_GSTACK"
+    link_generated_skill_dirs "$host" "$SOURCE_GSTACK_DIR" "$HOST_SKILLS"
+    log "gstack ready ($host)."
+    log "  browse: $BROWSE_BIN"
+    log "  $host skills: $HOST_SKILLS"
+  done
 fi
 
 # 7. Create .agents/ sidecar symlinks for the real Codex skill target.
