@@ -521,4 +521,13 @@ describe('host config correctness', () => {
       expect(config.runtimeRoot.globalSymlinks).toContain('ETHOS.md');
     }
   });
+
+  test('generated hosts expose complete review runtime assets', () => {
+    for (const config of [opencode, cursor, slate]) {
+      expect(config.runtimeRoot.globalFiles?.review).toContain('checklist.md');
+      expect(config.runtimeRoot.globalFiles?.review).toContain('design-checklist.md');
+      expect(config.runtimeRoot.globalFiles?.review).toContain('greptile-triage.md');
+      expect(config.runtimeRoot.globalFiles?.review).toContain('TODOS-format.md');
+    }
+  });
 });
